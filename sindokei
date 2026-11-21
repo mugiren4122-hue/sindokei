@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>簡易震度計 - Offline Seismometer</title>
+    <!-- Tailwind CSS (オンライン時用) と オフライン時のフォールバックスタイル -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* オフライン環境でもレイアウトとデザインが崩れないための基本スタイル */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=Noto+Sans+JP:wght@400;700;900&display=swap');
+
+        :root {
+            --bg-dark: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Inter', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, sans-serif;
+            overflow-x: hidden;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 気象庁震度階級カラー定義 */
+        .shindo-0 { background-color: #334155; color: #f8fafc; border-color: #475569; }
+        .shindo-1 { background-color: #0284c7; color: #ffffff; border-color: #38bdf8; }
+        .shindo-2 { background-color: #059669; color: #ffffff; border-color: #34d399; }
+        .shindo-3 { background-color: #d97706; color: #ffffff; border-color: #fbbf24; }
+        .shindo-4 { background-color: #ea580c; color: #ffffff; border-color: #fb923c; }
+        .shindo-5l { background-color: #dc2626; color: #ffffff; border-color: #f87171; }
+        .shindo-5u { background-color: #b91c1c; color: #ffffff; border-color: #fca5a5; }
+        .shindo-6l { background-color: #9333ea; color: #ffffff; border-color: #c084fc; }
+        .shindo-6u { background-color: #6b21a8; color: #ffffff; border-color: #e879f9; }
+        .shindo-7 { background-color: #831843; color: #ffffff; border-color: #f472b6; box-shadow: 0 0 25px rgba(244, 114, 182, 0.6); }
+
+        /* カスタムレイアウトクラス (Tailwind未ロード時の保険) */
+        .container-app {
+            max-width: 600px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 12px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .panel {
+            background-color: var(--card-bg);
+            border-radius: 16px;
+            padding: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            border-radius: 8px;
+            background-color: #090d16;
+        }
+
+        .btn {
+            cursor: pointer;
+            border: none;
+            border-radius: 12px;
+            font-weight: 700;
+            transition: transform 0.1s, opacity 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn:active {
+            transform: scale(0.96);
+        }
+
+        /* 警報点滅アニメーション */
+        @keyframes pulseAlert {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .alert-flash {
+            animation: pulseAlert 0.6s infinite;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container-app">
+        <!-- ヘッダー -->
+        <header class="flex items-center justify-between px-1">
+            <div>
+                <h1 class="text-lg font-black tracking-wider text-slate-100 flex items-center gap-2">
+                    <span class="inline-block w-3 h-3 rounded-full bg-emerald-400" id="status-dot"></span>
+                    簡易震度計 <span class="text-xs font-normal text-slate-400">OFFLINE READY</span>
+                </h1>
+                <p class="text-xs text-slate-400" id="sensor-status">待機中 - センサーを開始してください</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <!-- 音声アラート切替 -->
+                <button id="btn-sound" class="btn bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 text-xs rounded-xl" title="警報音のオン/オフ">
+                    <span id="sound-icon">🔊</span> 警報音: ON
+                </button>
+            </div>
+        </header>
+
+        <!-- メイン震度表示パネル -->
+        <div class="grid grid-cols-2 gap-3">
+            <!-- 現在のリアルタイム震度 -->
+            <div id="current-shindo-card" class="panel shindo-0 border-2 transition-colors duration-200 flex flex-col items-center justify-center py-4 relative overflow-hidden">
+                <span class="text-xs font-bold tracking-widest opacity-80 mb-1">現在震度</span>
+                <div class="text-6xl font-black leading-none my-1" id="current-shindo-text">0</div>
+                <div class="text-xs font-mono opacity-90 mt-1">
+                    計測震度: <span id="current-instrumental" class="font-bold">0.0</span>
+                </div>
+            </div>
+
+            <!-- 最大震度（ホールド値） -->
+            <div id="max-shindo-card" class="panel shindo-0 border-2 transition-colors duration-200 flex flex-col items-center justify-center py-4 relative">
+                <span class="text-xs font-bold tracking-widest opacity-80 mb-1">最大震度</span>
+                <div class="text-6xl font-black leading-none my-1" id="max-shindo-text">0</div>
+                <div class="text-xs font-mono opacity-90 mt-1">
+                    最大計測: <span id="max-instrumental" class="font-bold">0.0</span>
+                </div>
+                <button id="btn-reset-max" class="mt-2 text-[11px] bg-black/30 hover:bg-black/50 px-2.5 py-1 rounded-full font-bold transition">
+                    リセット
+                </button>
+            </div>
+        </div>
+
+        <!-- 数値データインジケーター -->
+        <div class="panel py-3 px-4">
+            <div class="grid grid-cols-4 gap-2 text-center">
+                <div>
+                    <div class="text-[10px] text-slate-400 font-bold">合成加速度</div>
+                    <div class="text-sm font-mono font-bold text-emerald-400"><span id="val-gal">0.0</span> <span class="text-[10px]">gal</span></div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-slate-400 font-bold">X軸 (左右)</div>
+                    <div class="text-sm font-mono font-semibold text-rose-400" id="val-x">0.0</div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-slate-400 font-bold">Y軸 (前後)</div>
+                    <div class="text-sm font-mono font-semibold text-sky-400" id="val-y">0.0</div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-slate-400 font-bold">Z軸 (上下)</div>
+                    <div class="text-sm font-mono font-semibold text-amber-400" id="val-z">0.0</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- リアルタイム波形グラフ (3軸 + 合成) -->
+        <div class="panel flex-1 flex flex-col min-h-[200px] p-3">
+            <div class="flex justify-between items-center mb-2 px-1">
+                <span class="text-xs font-bold text-slate-300">加速度波形モニター (gal)</span>
+                <div class="flex gap-3 text-[10px] font-bold">
+                    <span class="text-rose-400">■ X</span>
+                    <span class="text-sky-400">■ Y</span>
+                    <span class="text-amber-400">■ Z</span>
+                </div>
+            </div>
+            <div class="relative flex-1 w-full h-full min-h-[160px]">
+                <canvas id="wave-canvas"></canvas>
+            </div>
+        </div>
+
+        <!-- コントロール & キャリブレーション & テスト -->
+        <div class="panel flex flex-col gap-3">
+            <!-- メイン開始/停止ボタン -->
+            <button id="btn-toggle-sensor" class="btn w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white text-base shadow-lg">
+                ▶ センサー計測を開始
+            </button>
+
+            <div class="grid grid-cols-2 gap-2">
+                <!-- ゼロ点補正（キャリブレーション） -->
+                <button id="btn-calibrate" class="btn bg-slate-700 hover:bg-slate-600 text-slate-200 py-2.5 text-xs">
+                    ⚖️ ゼロ点補正 (水平基準)
+                </button>
+                <!-- テスト揺れ発生（PCや動作確認用） -->
+                <button id="btn-test-quake" class="btn bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 text-xs">
+                    📳 テスト揺れ発生
+                </button>
+            </div>
+
+            <!-- 感度調整スライダー -->
+            <div class="pt-1 border-t border-slate-700/80">
+                <div class="flex justify-between text-xs text-slate-400 mb-1">
+                    <span>センサー感度倍率</span>
+                    <span id="sensitivity-label" class="font-mono text-slate-200 font-bold">1.0x</span>
+                </div>
+                <input type="range" id="sensitivity-slider" min="0.2" max="3.0" step="0.1" value="1.0" class="w-full accent-emerald-500 cursor-pointer">
+            </div>
+        </div>
+
+        <!-- フッター注意書き -->
+        <footer class="text-center text-[11px] text-slate-500 pb-2">
+            ※端末内蔵センサーを用いた簡易計算値です。机など安定した場所に置いてご使用ください。
+        </footer>
+    </div>
+
+    <!-- センサーアクセス許可・案内モーダルダイアログ -->
+    <div id="permission-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 hidden">
+        <div class="bg-slate-800 border border-slate-600 rounded-2xl max-w-sm w-full p-5 shadow-2xl flex flex-col gap-4">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl">
+                    📱
+                </div>
+                <div>
+                    <h2 class="text-base font-bold text-white" id="modal-title">センサーアクセスの許可</h2>
+                    <p class="text-xs text-slate-400" id="modal-subtitle">端末の加速度センサーを使用します</p>
+                </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed" id="modal-desc">
+                揺れ（加速度）をリアルタイムで検知して震度を計算するため、端末の「動作と方向（加速度センサー）」へのアクセス許可が必要です。<br><br>
+                下の「許可して計測開始」を押すとOSの確認ダイアログが表示されますので<strong>「許可」</strong>を選択してください。
+            </p>
+
+            <div id="modal-warning-box" class="bg-amber-950/60 border border-amber-600/50 rounded-xl p-3 text-[11px] text-amber-200 hidden">
+                ⚠️ <strong>注意：</strong>現在 <code>file://</code>（ローカルファイル直接開き）や非HTTPS環境で開いているため、ブラウザのセキュリティ制限によりOSのセンサー許可ダイアログが出ない場合があります。その場合は「テスト揺れ発生」で動作確認できます。
+            </div>
+
+            <div class="flex gap-2 pt-1">
+                <button id="btn-modal-cancel" class="btn flex-1 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs">
+                    キャンセル
+                </button>
+                <button id="btn-modal-allow" class="btn flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs shadow-lg">
+                    許可して計測開始
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- カスタム通知トースト -->
+    <div id="toast-msg" class="fixed bottom-5 left-1/2 transform -translate-x-1/2 bg-slate-800 border border-slate-600 text-white px-4 py-2.5 rounded-full text-xs font-bold shadow-xl opacity-0 pointer-events-none transition-opacity duration-300 z-50">
+        メッセージ
+    </div>
+
+    <script>
+        /**
+         * オフライン簡易震度計ロジック
+         * Zeroquake氏の簡易震度計コンセプトを参考に、Web標準APIのみで完結する実装
+         */
+
+        // --- 状態管理変数 ---
+        let isRunning = false;
+        let soundEnabled = true;
+        let sensitivity = 1.0;
+
+        // 加速度データ (m/s^2 -> gal変換は 1 m/s^2 = 100 gal)
+        let rawAcc = { x: 0, y: 0, z: 0 };
+        let offsetAcc = { x: 0, y: 0, z: 0 };
+        // ローパスフィルタ用 (重力成分分離)
+        let gravity = { x: 0, y: 0, z: 0 };
+        let isFirstReading = true;
+
+        // 波形履歴バッファ (グラフ描画用)
+        const MAX_HISTORY = 150;
+        let historyX = new Array(MAX_HISTORY).fill(0);
+        let historyY = new Array(MAX_HISTORY).fill(0);
+        let historyZ = new Array(MAX_HISTORY).fill(0);
+
+        // 震度計算用バッファ (直近約0.5秒〜1秒の合成galを保持し、0.3秒継続相当を近似)
+        const GAL_BUFFER_SIZE = 20;
+        let galBuffer = new Array(GAL_BUFFER_SIZE).fill(0);
+
+        // 震度状態
+        let currentShindoObj = { label: '0', class: 'shindo-0', instrumental: 0.0 };
+        let maxShindoObj = { label: '0', class: 'shindo-0', instrumental: 0.0 };
+        let lastAlertTime = 0;
+
+        // テスト揺れシミュレーション用
+        let testQuakeTimer = null;
+        let testQuakeIntensity = 0;
+
+        // AudioContext (オフライン効果音生成)
+        let audioCtx = null;
+
+        // --- DOM要素の取得 ---
+        const btnToggle = document.getElementById('btn-toggle-sensor');
+        const btnCalibrate = document.getElementById('btn-calibrate');
+        const btnTestQuake = document.getElementById('btn-test-quake');
+        const btnResetMax = document.getElementById('btn-reset-max');
+        const btnSound = document.getElementById('btn-sound');
+        const sliderSensitivity = document.getElementById('sensitivity-slider');
+        const labelSensitivity = document.getElementById('sensitivity-label');
+        const sensorStatus = document.getElementById('sensor-status');
+        const statusDot = document.getElementById('status-dot');
+
+        const currentCard = document.getElementById('current-shindo-card');
+        const currentText = document.getElementById('current-shindo-text');
+        const currentInst = document.getElementById('current-instrumental');
+
+        const maxCard = document.getElementById('max-shindo-card');
+        const maxText = document.getElementById('max-shindo-text');
+        const maxInst = document.getElementById('max-instrumental');
+
+        const valGal = document.getElementById('val-gal');
+        const valX = document.getElementById('val-x');
+        const valY = document.getElementById('val-y');
+        const valZ = document.getElementById('val-z');
+
+        const canvas = document.getElementById('wave-canvas');
+        const ctx = canvas.getContext('2d');
+        const toastEl = document.getElementById('toast-msg');
+
+        // モーダル要素
+        const permissionModal = document.getElementById('permission-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalDesc = document.getElementById('modal-desc');
+        const modalWarningBox = document.getElementById('modal-warning-box');
+        const btnModalAllow = document.getElementById('btn-modal-allow');
+        const btnModalCancel = document.getElementById('btn-modal-cancel');
+
+        let sensorDataReceived = false;
+        let sensorCheckTimeout = null;
+
+        // --- トースト通知関数 ---
+        let toastTimeout;
+        function showToast(msg) {
+            toastEl.textContent = msg;
+            toastEl.classList.remove('opacity-0');
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toastEl.classList.add('opacity-0');
+            }, 2500);
+        }
+
+        // --- Web Audio API による警報音生成 (外部ファイル不要) ---
+        function playAlertBeep(shindoNum) {
+            if (!soundEnabled) return;
+            const now = Date.now();
+            if (now - lastAlertTime < 1200) return; // 連続鳴動防止
+            lastAlertTime = now;
+
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                // 震度に応じて音程とパターンを変化
+                osc.type = shindoNum >= 4.5 ? 'sawtooth' : 'sine';
+                const freq = shindoNum >= 4.5 ? 880 : 660;
+                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(freq * 1.25, audioCtx.currentTime + 0.15);
+
+                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.35);
+            } catch (e) {
+                console.warn('Audio playback failed:', e);
+            }
+        }
+
+        // --- 気象庁震度階級への変換ロジック ---
+        // 簡易計測震度 I = 2 * log10(a) + 0.94 (aは0.3秒以上継続する合成加速度gal)
+        function calculateShindoFromGal(effectiveGal) {
+            if (effectiveGal < 0.8) {
+                return { label: '0', class: 'shindo-0', instrumental: 0.0 };
+            }
+
+            // 計測震度の近似式
+            let inst = 2.0 * Math.log10(effectiveGal) + 0.94;
+            inst = Math.max(0, Math.round(inst * 10) / 10);
+
+            if (inst < 0.5) return { label: '0', class: 'shindo-0', instrumental: inst };
+            if (inst < 1.5) return { label: '1', class: 'shindo-1', instrumental: inst };
+            if (inst < 2.5) return { label: '2', class: 'shindo-2', instrumental: inst };
+            if (inst < 3.5) return { label: '3', class: 'shindo-3', instrumental: inst };
+            if (inst < 4.5) return { label: '4', class: 'shindo-4', instrumental: inst };
+            if (inst < 5.0) return { label: '5弱', class: 'shindo-5l', instrumental: inst };
+            if (inst < 5.5) return { label: '5強', class: 'shindo-5u', instrumental: inst };
+            if (inst < 6.0) return { label: '6弱', class: 'shindo-6l', instrumental: inst };
+            if (inst < 6.5) return { label: '6強', class: 'shindo-6u', instrumental: inst };
+            return { label: '7', class: 'shindo-7', instrumental: inst };
+        }
+
+        // --- 加速度データの処理と震度更新 ---
+        function processAcceleration(ax, ay, az) {
+            // キャリブレーションオフセット適用 & 感度倍率適用 (gal単位: 1 m/s^2 = 100 gal)
+            const gx = (ax - offsetAcc.x) * 100 * sensitivity;
+            const gy = (ay - offsetAcc.y) * 100 * sensitivity;
+            const gz = (az - offsetAcc.z) * 100 * sensitivity;
+
+            // 微小ノイズカット (デッドゾーン)
+            const cleanX = Math.abs(gx) < 0.4 ? 0 : gx;
+            const cleanY = Math.abs(gy) < 0.4 ? 0 : gy;
+            const cleanZ = Math.abs(gz) < 0.4 ? 0 : gz;
+
+            // 3軸合成加速度 (gal)
+            const compositeGal = Math.sqrt(cleanX * cleanX + cleanY * cleanY + cleanZ * cleanZ);
+
+            // 波形履歴に追加
+            historyX.push(cleanX);
+            historyX.shift();
+            historyY.push(cleanY);
+            historyY.shift();
+            historyZ.push(cleanZ);
+            historyZ.shift();
+
+            // 0.3秒継続相当の加速度を算出するため、直近バッファの上位パーセンタイル（3番目に大きい値など）を使用
+            galBuffer.push(compositeGal);
+            galBuffer.shift();
+            const sorted = [...galBuffer].sort((a, b) => b - a);
+            const sustainedGal = sorted[Math.floor(GAL_BUFFER_SIZE * 0.25)]; // 上位25%の値を代表値とする
+
+            // 震度計算
+            const shindo = calculateShindoFromGal(sustainedGal);
+            currentShindoObj = shindo;
+
+            // 最大震度の更新チェック
+            if (shindo.instrumental > maxShindoObj.instrumental) {
+                maxShindoObj = { ...shindo };
+                updateMaxCardUI();
+            }
+
+            // 震度3以上で警報音
+            if (shindo.instrumental >= 2.5) {
+                playAlertBeep(shindo.instrumental);
+            }
+
+            // UI数値更新
+            valGal.textContent = compositeGal.toFixed(1);
+            valX.textContent = cleanX.toFixed(1);
+            valY.textContent = cleanY.toFixed(1);
+            valZ.textContent = cleanZ.toFixed(1);
+
+            updateCurrentCardUI();
+        }
+
+        function updateCurrentCardUI() {
+            currentCard.className = `panel ${currentShindoObj.class} border-2 transition-colors duration-150 flex flex-col items-center justify-center py-4 relative overflow-hidden`;
+            if (currentShindoObj.instrumental >= 3.5) {
+                currentCard.classList.add('alert-flash');
+            }
+            currentText.textContent = currentShindoObj.label;
+            // 文字サイズ調整（5弱などの2文字表記用）
+            currentText.style.fontSize = currentShindoObj.label.length > 1 ? '2.75rem' : '3.75rem';
+            currentInst.textContent = currentShindoObj.instrumental.toFixed(1);
+        }
+
+        function updateMaxCardUI() {
+            maxCard.className = `panel ${maxShindoObj.class} border-2 transition-colors duration-200 flex flex-col items-center justify-center py-4 relative`;
+            maxText.textContent = maxShindoObj.label;
+            maxText.style.fontSize = maxShindoObj.label.length > 1 ? '2.75rem' : '3.75rem';
+            maxInst.textContent = maxShindoObj.instrumental.toFixed(1);
+        }
+
+        // --- DeviceMotionEvent ハンドラ ---
+        function handleDeviceMotion(event) {
+            if (!isRunning) return;
+
+            // センサーから実際にデータが流れてきたことを検知
+            if (!sensorDataReceived) {
+                sensorDataReceived = true;
+                clearTimeout(sensorCheckTimeout);
+                sensorStatus.textContent = '計測中 - センサー正常受信中';
+            }
+
+            // 重力加速度を除いた値 (acceleration) が取得できる場合はそれを使用
+            if (event.acceleration && event.acceleration.x !== null) {
+                rawAcc.x = event.acceleration.x;
+                rawAcc.y = event.acceleration.y;
+                rawAcc.z = event.acceleration.z;
+            } else if (event.accelerationIncludingGravity && event.accelerationIncludingGravity.x !== null) {
+                // 重力込みしか取れない端末用ハイパスフィルタ処理
+                const alpha = 0.8;
+                const accG = event.accelerationIncludingGravity;
+                if (isFirstReading) {
+                    gravity.x = accG.x;
+                    gravity.y = accG.y;
+                    gravity.z = accG.z;
+                    isFirstReading = false;
+                }
+                gravity.x = alpha * gravity.x + (1 - alpha) * accG.x;
+                gravity.y = alpha * gravity.y + (1 - alpha) * accG.y;
+                gravity.z = alpha * gravity.z + (1 - alpha) * accG.z;
+
+                rawAcc.x = accG.x - gravity.x;
+                rawAcc.y = accG.y - gravity.y;
+                rawAcc.z = accG.z - gravity.z;
+            } else {
+                return;
+            }
+
+            // テスト揺れが重畳されている場合は加算
+            const testX = testQuakeIntensity * (Math.random() - 0.5) * 2;
+            const testY = testQuakeIntensity * (Math.random() - 0.5) * 2;
+            const testZ = testQuakeIntensity * (Math.random() - 0.5) * 1.5;
+
+            processAcceleration(rawAcc.x + testX, rawAcc.y + testY, rawAcc.z + testZ);
+        }
+
+        // --- センサー開始・停止の入り口 ---
+        function handleToggleClick() {
+            if (isRunning) {
+                stopSensor();
+                return;
+            }
+
+            // 安全なコンテキスト(HTTPS / localhost)でない場合の警告表示準備
+            if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+                modalWarningBox.classList.remove('hidden');
+            } else {
+                modalWarningBox.classList.add('hidden');
+            }
+
+            // 許可確認モーダルダイアログを表示
+            modalTitle.textContent = 'センサーアクセスの許可';
+            modalDesc.innerHTML = '揺れ（加速度）をリアルタイムで検知して震度を計算するため、端末の「動作と方向（加速度センサー）」へのアクセス許可が必要です。<br><br>下の「許可して計測開始」を押すと確認ダイアログが表示されますので<strong>「許可」</strong>を選択してください。';
+            btnModalAllow.textContent = '許可して計測開始';
+            btnModalAllow.classList.remove('hidden');
+            permissionModal.classList.remove('hidden');
+        }
+
+        // --- モーダル内の「許可して計測開始」ボタン押下時（ユーザージェスチャー直下で実行） ---
+        async function executeSensorPermissionAndStart() {
+            permissionModal.classList.add('hidden');
+
+            // AudioContextの初期化（ユーザー操作トリガー内で行う）
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            // iOS 13+ Safari などのセンサーアクセス許可ダイアログ呼び出し
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceMotionEvent.requestPermission();
+                    if (permissionState !== 'granted') {
+                        showPermissionDeniedDialog();
+                        return;
+                    }
+                } catch (error) {
+                    console.error('DeviceMotion permission error:', error);
+                    showPermissionDeniedDialog(error.message);
+                    return;
+                }
+            } else if (typeof DeviceMotionEvent === 'undefined') {
+                showToast('この端末・ブラウザは加速度センサーに対応していません');
+                return;
+            }
+
+            startSensorListener();
+        }
+
+        // --- センサーイベント購読開始 ---
+        function startSensorListener() {
+            isRunning = true;
+            isFirstReading = true;
+            sensorDataReceived = false;
+
+            window.addEventListener('devicemotion', handleDeviceMotion);
+
+            btnToggle.innerHTML = '⏹ 計測を停止';
+            btnToggle.classList.remove('bg-emerald-600', 'hover:bg-emerald-500');
+            btnToggle.classList.add('bg-rose-600', 'hover:bg-rose-500');
+            sensorStatus.textContent = 'センサー応答待機中...';
+            statusDot.classList.remove('bg-slate-500');
+            statusDot.classList.add('bg-emerald-400');
+            showToast('センサー計測を開始しました');
+
+            // 2秒経ってもセンサー値が来ない場合（PCや許可ブロック時）の案内
+            clearTimeout(sensorCheckTimeout);
+            sensorCheckTimeout = setTimeout(() => {
+                if (isRunning && !sensorDataReceived) {
+                    sensorStatus.textContent = 'センサー信号なし（PCまたは権限未許可）';
+                    showToast('センサー信号が検出されません。「テスト揺れ」で動作確認できます');
+                }
+            }, 2000);
+        }
+
+        // --- センサー停止処理 ---
+        function stopSensor() {
+            isRunning = false;
+            clearTimeout(sensorCheckTimeout);
+            window.removeEventListener('devicemotion', handleDeviceMotion);
+            btnToggle.innerHTML = '▶ センサー計測を開始';
+            btnToggle.classList.remove('bg-rose-600', 'hover:bg-rose-500');
+            btnToggle.classList.add('bg-emerald-600', 'hover:bg-emerald-500');
+            sensorStatus.textContent = '停止中';
+            statusDot.classList.remove('bg-emerald-400', 'animate-ping');
+            statusDot.classList.add('bg-slate-500');
+            showToast('計測を停止しました');
+        }
+
+        // --- 拒否・エラー時の再案内ダイアログ ---
+        function showPermissionDeniedDialog(errDetail = '') {
+            modalTitle.textContent = 'センサーアクセスが許可されませんでした';
+            modalDesc.innerHTML = `端末の加速度センサーへのアクセスがブロックされています。<br><br>
+            <strong>【解決方法】</strong><br>
+            ・iPhoneの場合：一度ブラウザのタブを閉じて開き直すか、「設定 ＞ Safari ＞ 履歴とWebサイトデータを消去」後に再度「許可」を押してください。<br>
+            ・ローカルファイル（file://）で開いている場合は、HTTPSサーバーやホーム画面アプリ経由で開く必要があります。
+            ${errDetail ? `<br><span class="text-[10px] text-slate-400">詳細: ${errDetail}</span>` : ''}`;
+            btnModalAllow.classList.add('hidden');
+            modalWarningBox.classList.add('hidden');
+            permissionModal.classList.remove('hidden');
+        }
+
+        // --- ゼロ点補正 (キャリブレーション) ---
+        function calibrateZero() {
+            offsetAcc = { ...rawAcc };
+            galBuffer.fill(0);
+            showToast('現在の傾き・オフセットをゼロ基準に設定しました');
+        }
+
+        // --- テスト揺れ発生 (PCブラウザや動作確認用) ---
+        function triggerTestQuake() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            showToast('模擬地震波形（震度4〜5弱相当）を発生させます');
+            let step = 0;
+            const totalSteps = 80; // 約4秒間
+
+            if (testQuakeTimer) clearInterval(testQuakeTimer);
+
+            testQuakeTimer = setInterval(() => {
+                step++;
+                // P波(初期微動) -> S波(主要動) -> 減衰のエンベロープを生成
+                let envelope = 0;
+                if (step < 20) {
+                    envelope = (step / 20) * 0.4; // P波
+                } else if (step < 50) {
+                    envelope = 1.8 * Math.sin(((step - 20) / 30) * Math.PI); // S波ピーク
+                } else {
+                    envelope = Math.max(0, (1 - (step - 50) / 30) * 0.5); // 余韻
+                }
+
+                testQuakeIntensity = envelope;
+
+                // センサーが停止中の場合でも波形と震度が動くように直接フィード
+                if (!isRunning) {
+                    const simX = Math.sin(step * 0.9) * envelope + (Math.random() - 0.5) * envelope;
+                    const simY = Math.cos(step * 1.1) * envelope + (Math.random() - 0.5) * envelope;
+                    const simZ = Math.sin(step * 1.5) * (envelope * 0.7);
+                    processAcceleration(simX, simY, simZ);
+                }
+
+                if (step >= totalSteps) {
+                    clearInterval(testQuakeTimer);
+                    testQuakeIntensity = 0;
+                    if (!isRunning) {
+                        // 静止状態へ戻す
+                        for (let i = 0; i < GAL_BUFFER_SIZE; i++) {
+                            processAcceleration(0, 0, 0);
+                        }
+                    }
+                }
+            }, 50);
+        }
+
+        // --- Canvas 波形描画ループ ---
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+        }
+
+        function drawWaveform() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const width = rect.width;
+            const height = rect.height;
+            const midY = height / 2;
+
+            // 背景クリア
+            ctx.fillStyle = '#090d16';
+            ctx.fillRect(0, 0, width, height);
+
+            // グリッド線描画
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            // 中心線 (0 gal)
+            ctx.moveTo(0, midY);
+            ctx.lineTo(width, midY);
+            // 上下ガイド線
+            ctx.moveTo(0, midY - height * 0.3);
+            ctx.lineTo(width, midY - height * 0.3);
+            ctx.moveTo(0, midY + height * 0.3);
+            ctx.lineTo(width, midY + height * 0.3);
+            ctx.stroke();
+
+            // オートスケール計算 (最小レンジ ±20gal、大きな揺れに合わせて自動拡大)
+            let peak = 20;
+            for (let i = 0; i < MAX_HISTORY; i++) {
+                peak = Math.max(peak, Math.abs(historyX[i]), Math.abs(historyY[i]), Math.abs(historyZ[i]));
+            }
+            const scaleY = (height * 0.42) / peak;
+
+            // スケール表示テキスト
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.5)';
+            ctx.font = '10px monospace';
+            ctx.fillText(`+${Math.round(peak)} gal`, 6, 12);
+            ctx.fillText(`-${Math.round(peak)} gal`, 6, height - 6);
+
+            // 各軸の波形を描画するヘルパー
+            const drawAxisLine = (dataArray, color) => {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.8;
+                ctx.beginPath();
+                const stepX = width / (MAX_HISTORY - 1);
+                for (let i = 0; i < MAX_HISTORY; i++) {
+                    const x = i * stepX;
+                    const y = midY - dataArray[i] * scaleY;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            };
+
+            drawAxisLine(historyZ, '#fbbf24'); // Z軸 (琥珀色)
+            drawAxisLine(historyY, '#38bdf8'); // Y軸 (水色)
+            drawAxisLine(historyX, '#fb7185'); // X軸 (赤系)
+
+            requestAnimationFrame(drawWaveform);
+        }
+
+        // --- イベントリスナー登録 ---
+        btnToggle.addEventListener('click', handleToggleClick);
+        btnModalAllow.addEventListener('click', executeSensorPermissionAndStart);
+        btnModalCancel.addEventListener('click', () => {
+            permissionModal.classList.add('hidden');
+        });
+        btnCalibrate.addEventListener('click', calibrateZero);
+        btnTestQuake.addEventListener('click', triggerTestQuake);
+
+        btnResetMax.addEventListener('click', () => {
+            maxShindoObj = { label: '0', class: 'shindo-0', instrumental: 0.0 };
+            updateMaxCardUI();
+            showToast('最大震度をリセットしました');
+        });
+
+        btnSound.addEventListener('click', () => {
+            soundEnabled = !soundEnabled;
+            btnSound.innerHTML = soundEnabled ? '<span>🔊</span> 警報音: ON' : '<span>🔇</span> 警報音: OFF';
+            btnSound.classList.toggle('opacity-60', !soundEnabled);
+            showToast(soundEnabled ? '警報音をオンにしました' : '警報音をオフにしました');
+        });
+
+        sliderSensitivity.addEventListener('input', (e) => {
+            sensitivity = parseFloat(e.target.value);
+            labelSensitivity.textContent = `${sensitivity.toFixed(1)}x`;
+        });
+
+        window.addEventListener('resize', resizeCanvas);
+
+        // --- 初期化 ---
+        window.onload = () => {
+            resizeCanvas();
+            drawWaveform();
+        };
+    </script>
+</body>
+</html>
